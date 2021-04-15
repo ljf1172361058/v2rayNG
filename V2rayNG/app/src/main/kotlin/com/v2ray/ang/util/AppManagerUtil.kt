@@ -16,7 +16,7 @@ object AppManagerUtil {
         val apps = ArrayList<AppInfo>()
 
         for (pkg in packages) {
-            if (!pkg.hasInternetPermission) continue
+            if (!pkg.hasInternetPermission && pkg.packageName != "android") continue
 
             val applicationInfo = pkg.applicationInfo
 
@@ -31,7 +31,7 @@ object AppManagerUtil {
         return apps
     }
 
-    fun rxLoadNetworkAppList(ctx: Context): Observable<ArrayList<AppInfo>> = Observable.create {
+    fun rxLoadNetworkAppList(ctx: Context): Observable<ArrayList<AppInfo>> = Observable.unsafeCreate {
         it.onNext(loadNetworkAppList(ctx))
     }
 

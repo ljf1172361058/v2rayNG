@@ -1,29 +1,23 @@
 package com.v2ray.ang.ui
 
-
 import android.Manifest
 import android.app.Activity.RESULT_OK
 import android.content.Intent
 import android.os.Bundle
 import android.support.v4.app.Fragment
-import android.text.TextUtils
-import android.util.Log
+import android.support.v7.preference.PreferenceManager
 import android.view.*
 import com.v2ray.ang.R
-import com.v2ray.ang.extension.defaultDPreference
 import com.v2ray.ang.util.Utils
 import kotlinx.android.synthetic.main.fragment_routing_settings.*
-import org.jetbrains.anko.toast
 import android.view.MenuInflater
 import com.tbruyelle.rxpermissions.RxPermissions
 import com.v2ray.ang.AppConfig
-import org.jetbrains.anko.doAsync
-import org.jetbrains.anko.startActivityForResult
-import org.jetbrains.anko.support.v4.startActivityForResult
-import org.jetbrains.anko.support.v4.toast
-import org.jetbrains.anko.uiThread
+import com.v2ray.ang.extension.toast
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import java.net.URL
-
 
 class RoutingSettingsFragment : Fragment() {
     companion object {
@@ -31,6 +25,8 @@ class RoutingSettingsFragment : Fragment() {
         private const val REQUEST_SCAN_REPLACE = 11
         private const val REQUEST_SCAN_APPEND = 12
     }
+
+    val defaultSharedPreferences by lazy { PreferenceManager.getDefaultSharedPreferences(context) }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?,
                               savedInstanceState: Bundle?): View? {
@@ -46,10 +42,10 @@ class RoutingSettingsFragment : Fragment() {
         return fragment
     }
 
-    override fun onActivityCreated(savedInstanceState: Bundle?) {
-        super.onActivityCreated(savedInstanceState)
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
 
-        val content = activity?.defaultDPreference?.getPrefString(arguments!!.getString(routing_arg), "")
+        val content = defaultSharedPreferences.getString(arguments!!.getString(routing_arg), "")
         et_routing_content.text = Utils.getEditable(content!!)
 
         setHasOptionsMenu(true)
@@ -63,7 +59,7 @@ class RoutingSettingsFragment : Fragment() {
     override fun onOptionsItemSelected(item: MenuItem) = when (item.itemId) {
         R.id.save_routing -> {
             val content = et_routing_content.text.toString()
-            activity?.defaultDPreference?.setPrefString(arguments!!.getString(routing_arg), content)
+            defaultSharedPreferences.edit().putString(arguments!!.getString(routing_arg), content).apply()
             activity?.toast(R.string.toast_success)
             true
         }
@@ -96,7 +92,7 @@ class RoutingSettingsFragment : Fragment() {
                 .request(Manifest.permission.CAMERA)
                 .subscribe {
                     if (it)
-                        startActivityForResult<ScannerActivity>(requestCode)
+                        startActivityForResult(Intent(activity, ScannerActivity::class.java), requestCode)
                     else
                         activity?.toast(R.string.toast_permission_denied)
                 }
@@ -118,12 +114,17 @@ class RoutingSettingsFragment : Fragment() {
             }
         }
 
-        toast(R.string.msg_downloading_content)
-        doAsync {
-            val content = URL(url).readText()
-            uiThread {
-                et_routing_content.text = Utils.getEditable(content!!)
-                toast(R.string.toast_success)
+        activity?.toast(R.string.msg_downloading_content)
+        GlobalScope.launch(Dispatchers.IO) {
+            val content = try {
+                URL(url).readText()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                ""
+            }
+            launch(Dispatchers.Main) {
+                et_routing_content.text = Utils.getEditable(content)
+                activity?.toast(R.string.toast_success)
             }
         }
         return true

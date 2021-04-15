@@ -1,15 +1,18 @@
 package com.v2ray.ang.ui
 
-import android.support.v7.widget.LinearLayoutManager
+import android.content.Intent
 import android.view.Menu
 import android.view.MenuItem
 import com.v2ray.ang.R
 import kotlinx.android.synthetic.main.activity_sub_setting.*
 import android.os.Bundle
-import org.jetbrains.anko.startActivity
+import android.support.v7.widget.LinearLayoutManager
+import com.v2ray.ang.dto.SubscriptionItem
+import com.v2ray.ang.util.MmkvManager
 
 class SubSettingActivity : BaseActivity() {
 
+    var subscriptions:List<Pair<String, SubscriptionItem>> = listOf()
     private val adapter by lazy { SubSettingRecyclerAdapter(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,7 +30,8 @@ class SubSettingActivity : BaseActivity() {
 
     override fun onResume() {
         super.onResume()
-        adapter.updateConfigList()
+        subscriptions = MmkvManager.decodeSubscriptions()
+        adapter.notifyDataSetChanged()
     }
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
@@ -40,12 +44,9 @@ class SubSettingActivity : BaseActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem) = when (item.itemId) {
         R.id.add_config -> {
-            startActivity<SubEditActivity>("position" to -1)
-            adapter.updateConfigList()
+            startActivity(Intent(this, SubEditActivity::class.java))
             true
         }
         else -> super.onOptionsItemSelected(item)
     }
-
-
 }

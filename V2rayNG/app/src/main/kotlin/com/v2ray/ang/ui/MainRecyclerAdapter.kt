@@ -1,24 +1,31 @@
 package com.v2ray.ang.ui
 
+import android.content.Intent
 import android.graphics.Color
+import android.support.v4.content.ContextCompat
+import android.support.v7.app.AlertDialog
 import android.support.v7.widget.RecyclerView
-import android.text.TextUtils
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import com.google.gson.Gson
+import com.tencent.mmkv.MMKV
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
-import com.v2ray.ang.dto.AngConfig
+import com.v2ray.ang.dto.EConfigType
+import com.v2ray.ang.dto.SubscriptionItem
+import com.v2ray.ang.extension.toast
 import com.v2ray.ang.helper.ItemTouchHelperAdapter
 import com.v2ray.ang.helper.ItemTouchHelperViewHolder
+import com.v2ray.ang.service.V2RayServiceManager
 import com.v2ray.ang.util.AngConfigManager
+import com.v2ray.ang.util.MmkvManager
 import com.v2ray.ang.util.Utils
 import kotlinx.android.synthetic.main.item_qrcode.view.*
 import kotlinx.android.synthetic.main.item_recycler_main.view.*
-import org.jetbrains.anko.*
 import rx.Observable
 import rx.android.schedulers.AndroidSchedulers
 import java.util.concurrent.TimeUnit
-import com.v2ray.ang.extension.defaultDPreference
 
 class MainRecyclerAdapter(val activity: MainActivity) : RecyclerView.Adapter<MainRecyclerAdapter.BaseViewHolder>()
         , ItemTouchHelperAdapter {
@@ -28,140 +35,112 @@ class MainRecyclerAdapter(val activity: MainActivity) : RecyclerView.Adapter<Mai
     }
 
     private var mActivity: MainActivity = activity
-    private lateinit var configs: AngConfig
+    private val mainStorage by lazy { MMKV.mmkvWithID(MmkvManager.ID_MAIN, MMKV.MULTI_PROCESS_MODE) }
+    private val subStorage by lazy { MMKV.mmkvWithID(MmkvManager.ID_SUB, MMKV.MULTI_PROCESS_MODE) }
     private val share_method: Array<out String> by lazy {
         mActivity.resources.getStringArray(R.array.share_method)
     }
+    var isRunning = false
 
-    var changeable: Boolean = true
-        set(value) {
-            if (field == value)
-                return
-            field = value
-            notifyDataSetChanged()
-        }
-
-    init {
-        updateConfigList()
-    }
-
-    override fun getItemCount() = configs.vmess.count() + 1
+    override fun getItemCount() = mActivity.mainViewModel.serverList.size + 1
 
     override fun onBindViewHolder(holder: BaseViewHolder, position: Int) {
         if (holder is MainViewHolder) {
-            val configType = configs.vmess[position].configType
-            val remarks = configs.vmess[position].remarks
-            val subid = configs.vmess[position].subid
-            val address = configs.vmess[position].address
-            val port = configs.vmess[position].port
-            val test_result = configs.vmess[position].testResult
+            val guid = mActivity.mainViewModel.serverList.getOrNull(position) ?: return
+            val config = MmkvManager.decodeServerConfig(guid) ?: return
+            val outbound = config.getProxyOutbound()
+            val aff = MmkvManager.decodeServerAffiliationInfo(guid)
 
-            holder.name.text = remarks
-            holder.radio.isChecked = (position == configs.index)
-            holder.itemView.backgroundColor = Color.TRANSPARENT
-            holder.test_result.text = test_result
-
-            if (TextUtils.isEmpty(subid)) {
-                holder.subid.text = ""
+            holder.name.text = config.remarks
+            holder.radio.isChecked = guid == mainStorage?.decodeString(MmkvManager.KEY_SELECTED_SERVER)
+            holder.itemView.setBackgroundColor(Color.TRANSPARENT)
+            holder.test_result.text = aff?.getTestDelayString() ?: ""
+            if (aff?.testDelayMillis?:0L < 0L) {
+                holder.test_result.setTextColor(ContextCompat.getColor(mActivity, android.R.color.holo_red_dark))
             } else {
-                holder.subid.text = "S"
+                holder.test_result.setTextColor(ContextCompat.getColor(mActivity, R.color.colorPing))
+            }
+            holder.subscription.text = ""
+            val json = subStorage?.decodeString(config.subscriptionId)
+            if (!json.isNullOrBlank()) {
+                val sub = Gson().fromJson(json, SubscriptionItem::class.java)
+                holder.subscription.text = sub.remarks
             }
 
-            if (configType == AppConfig.EConfigType.Vmess) {
-                holder.type.text = "vmess"
-                holder.statistics.text = "$address : $port"
-                holder.layout_share.visibility = View.VISIBLE
-            } else if (configType == AppConfig.EConfigType.Custom) {
+            var shareOptions = share_method.asList()
+            if (config.configType == EConfigType.CUSTOM) {
                 holder.type.text = mActivity.getString(R.string.server_customize_config)
-                holder.statistics.text = ""//mActivity.getString(R.string.server_customize_config)
-                holder.layout_share.visibility = View.INVISIBLE
-            } else if (configType == AppConfig.EConfigType.Shadowsocks) {
-                holder.type.text = "shadowsocks"
-                holder.statistics.text = "$address : $port"
-                holder.layout_share.visibility = View.VISIBLE
-            } else if (configType == AppConfig.EConfigType.Socks) {
-                holder.type.text = "socks"
-                holder.statistics.text = "$address : $port"
-                holder.layout_share.visibility = View.VISIBLE
+                shareOptions = shareOptions.takeLast(1)
+            } else if (config.configType == EConfigType.VLESS) {
+                holder.type.text = config.configType.name
+            } else {
+                holder.type.text = config.configType.name.toLowerCase()
             }
+            holder.statistics.text = "${outbound?.getServerAddress()} : ${outbound?.getServerPort()}"
 
             holder.layout_share.setOnClickListener {
-                mActivity.selector(null, share_method.asList()) { dialogInterface, i ->
+                AlertDialog.Builder(mActivity).setItems(shareOptions.toTypedArray()) { _, i ->
                     try {
                         when (i) {
                             0 -> {
-                                val iv = mActivity.layoutInflater.inflate(R.layout.item_qrcode, null)
-                                iv.iv_qcode.setImageBitmap(AngConfigManager.share2QRCode(position))
-
-                                mActivity.alert {
-                                    customView {
-                                        linearLayout {
-                                            addView(iv)
-                                        }
-                                    }
-                                }.show()
+                                if (config.configType == EConfigType.CUSTOM) {
+                                    shareFullContent(guid)
+                                } else {
+                                    val iv = LayoutInflater.from(mActivity).inflate(R.layout.item_qrcode, null)
+                                    iv.iv_qcode.setImageBitmap(AngConfigManager.share2QRCode(guid))
+                                    AlertDialog.Builder(mActivity).setView(iv).show()
+                                }
                             }
                             1 -> {
-                                if (AngConfigManager.share2Clipboard(position) == 0) {
+                                if (AngConfigManager.share2Clipboard(mActivity, guid) == 0) {
                                     mActivity.toast(R.string.toast_success)
                                 } else {
                                     mActivity.toast(R.string.toast_failure)
                                 }
                             }
-                            2 -> {
-                                if (AngConfigManager.shareFullContent2Clipboard(position) == 0) {
-                                    mActivity.toast(R.string.toast_success)
-                                } else {
-                                    mActivity.toast(R.string.toast_failure)
-                                }
-                            }
-                            else ->
-                                mActivity.toast("else")
+                            2 -> shareFullContent(guid)
+                            else -> mActivity.toast("else")
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
-                }
+                }.show()
             }
 
             holder.layout_edit.setOnClickListener {
-                if (configType == AppConfig.EConfigType.Vmess) {
-                    mActivity.startActivity<ServerActivity>("position" to position, "isRunning" to !changeable)
-                } else if (configType == AppConfig.EConfigType.Custom) {
-                    mActivity.startActivity<Server2Activity>("position" to position, "isRunning" to !changeable)
-                } else if (configType == AppConfig.EConfigType.Shadowsocks) {
-                    mActivity.startActivity<Server3Activity>("position" to position, "isRunning" to !changeable)
-                } else if (configType == AppConfig.EConfigType.Socks) {
-                    mActivity.startActivity<Server4Activity>("position" to position, "isRunning" to !changeable)
+                val intent = Intent().putExtra("guid", guid)
+                        .putExtra("isRunning", isRunning)
+                if (config.configType == EConfigType.CUSTOM) {
+                    mActivity.startActivity(intent.setClass(mActivity, ServerCustomConfigActivity::class.java))
+                } else {
+                    mActivity.startActivity(intent.setClass(mActivity, ServerActivity::class.java))
                 }
             }
             holder.layout_remove.setOnClickListener {
-                if (configs.index != position) {
-                    if (AngConfigManager.removeServer(position) == 0) {
-                        notifyItemRemoved(position)
-                        updateSelectedItem(position)
-                    }
+                if (guid != mainStorage?.decodeString(MmkvManager.KEY_SELECTED_SERVER)) {
+                    mActivity.mainViewModel.removeServer(guid)
+                    notifyItemRemoved(position)
+                    notifyItemRangeChanged(position, mActivity.mainViewModel.serverList.size)
                 }
             }
 
             holder.infoContainer.setOnClickListener {
-                if (changeable) {
-                    AngConfigManager.setActiveServer(position)
-                } else {
-                    mActivity.showCircle()
-                    Utils.stopVService(mActivity)
-                    AngConfigManager.setActiveServer(position)
-                    Observable.timer(500, TimeUnit.MILLISECONDS)
-                            .observeOn(AndroidSchedulers.mainThread())
-                            .subscribe {
-                                mActivity.showCircle()
-                                if (!Utils.startVService(mActivity)) {
+                val selected = mainStorage?.decodeString(MmkvManager.KEY_SELECTED_SERVER)
+                if (guid != selected) {
+                    mainStorage?.encode(MmkvManager.KEY_SELECTED_SERVER, guid)
+                    notifyItemChanged(mActivity.mainViewModel.serverList.indexOf(selected))
+                    notifyItemChanged(mActivity.mainViewModel.serverList.indexOf(guid))
+                    if (isRunning) {
+                        mActivity.showCircle()
+                        Utils.stopVService(mActivity)
+                        Observable.timer(500, TimeUnit.MILLISECONDS)
+                                .observeOn(AndroidSchedulers.mainThread())
+                                .subscribe {
+                                    V2RayServiceManager.startV2Ray(mActivity)
                                     mActivity.hideCircle()
                                 }
-                            }
-
+                    }
                 }
-                notifyDataSetChanged()
             }
         }
         if (holder is FooterViewHolder) {
@@ -170,49 +149,43 @@ class MainRecyclerAdapter(val activity: MainActivity) : RecyclerView.Adapter<Mai
                 holder.layout_edit.visibility = View.INVISIBLE
             } else {
                 holder.layout_edit.setOnClickListener {
-                    Utils.openUri(mActivity, AppConfig.promotionUrl)
+                    Utils.openUri(mActivity, "${Utils.decode(AppConfig.promotionUrl)}?t=${System.currentTimeMillis()}")
                 }
             }
         }
     }
 
+    private fun shareFullContent(guid: String) {
+        if (AngConfigManager.shareFullContent2Clipboard(mActivity, guid) == 0) {
+            mActivity.toast(R.string.toast_success)
+        } else {
+            mActivity.toast(R.string.toast_failure)
+        }
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): BaseViewHolder {
-        when (viewType) {
+        return when (viewType) {
             VIEW_TYPE_ITEM ->
-                return MainViewHolder(parent.context.layoutInflater
+                MainViewHolder(LayoutInflater.from(parent.context)
                         .inflate(R.layout.item_recycler_main, parent, false))
             else ->
-                return FooterViewHolder(parent.context.layoutInflater
+                FooterViewHolder(LayoutInflater.from(parent.context)
                         .inflate(R.layout.item_recycler_footer, parent, false))
         }
     }
 
-    fun updateConfigList() {
-        configs = AngConfigManager.configs
-        notifyDataSetChanged()
-    }
-
-//    fun updateSelectedItem() {
-//        updateSelectedItem(configs.index)
-//    }
-
-    fun updateSelectedItem(pos: Int) {
-        //notifyItemChanged(pos)
-        notifyItemRangeChanged(pos, itemCount - pos)
-    }
-
     override fun getItemViewType(position: Int): Int {
-        if (position == configs.vmess.count()) {
-            return VIEW_TYPE_FOOTER
+        return if (position == mActivity.mainViewModel.serverList.size) {
+            VIEW_TYPE_FOOTER
         } else {
-            return VIEW_TYPE_ITEM
+            VIEW_TYPE_ITEM
         }
     }
 
     open class BaseViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView)
 
     class MainViewHolder(itemView: View) : BaseViewHolder(itemView), ItemTouchHelperViewHolder {
-        val subid = itemView.tv_subid
+        val subscription = itemView.tv_subscription!!
         val radio = itemView.btn_radio!!
         val name = itemView.tv_name!!
         val test_result = itemView.tv_test_result!!
@@ -245,24 +218,26 @@ class MainRecyclerAdapter(val activity: MainActivity) : RecyclerView.Adapter<Mai
     }
 
     override fun onItemDismiss(position: Int) {
-        if (configs.index != position) {
+        val guid = mActivity.mainViewModel.serverList.getOrNull(position) ?: return
+        if (guid != mainStorage?.decodeString(MmkvManager.KEY_SELECTED_SERVER)) {
 //            mActivity.alert(R.string.del_config_comfirm) {
 //                positiveButton(android.R.string.ok) {
-            if (AngConfigManager.removeServer(position) == 0) {
-                notifyItemRemoved(position)
-            }
+            mActivity.mainViewModel.removeServer(guid)
+            notifyItemRemoved(position)
 //                }
 //                show()
 //            }
         }
-        updateSelectedItem(position)
     }
 
     override fun onItemMove(fromPosition: Int, toPosition: Int): Boolean {
-        AngConfigManager.swapServer(fromPosition, toPosition)
+        mActivity.mainViewModel.swapServer(fromPosition, toPosition)
         notifyItemMoved(fromPosition, toPosition)
-        //notifyDataSetChanged()
-        updateSelectedItem(if (fromPosition < toPosition) fromPosition else toPosition)
+        //notifyItemRangeChanged(fromPosition, toPosition - fromPosition + 1)
         return true
+    }
+
+    override fun onItemMoveCompleted() {
+        // do nothing
     }
 }
